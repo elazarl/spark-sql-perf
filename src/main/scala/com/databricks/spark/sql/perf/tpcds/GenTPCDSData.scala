@@ -20,7 +20,7 @@ import org.apache.spark.sql.SparkSession
 
 case class GenTPCDSDataConfig(
     master: String = "local[*]",
-    dsdgenDir: String = null,
+    dsdgenDir: String = "/usr/local/bin",
     scaleFactor: String = null,
     location: String = null,
     format: String = null,
@@ -30,8 +30,7 @@ case class GenTPCDSDataConfig(
     partitionTables: Boolean = true,
     clusterByPartitionColumns: Boolean = true,
     filterOutNullPartitionValues: Boolean = true,
-    tableFilter: String = "",
-    numPartitions: Int = 100)
+    numPartitions: Int = 10000)
 
 /**
  * Gen TPCDS data.
@@ -77,9 +76,6 @@ object GenTPCDSData {
       opt[Boolean]('v', "filterOutNullPartitionValues")
         .action((x, c) => c.copy(filterOutNullPartitionValues = x))
         .text("true to filter out the partition with NULL key value")
-      opt[String]('t', "tableFilter")
-        .action((x, c) => c.copy(tableFilter = x))
-        .text("\"\" means generate all tables")
       opt[Int]('n', "numPartitions")
         .action((x, c) => c.copy(numPartitions = x))
         .text("how many dsdgen partitions to run - number of input tasks.")
@@ -101,6 +97,8 @@ object GenTPCDSData {
       .appName(getClass.getName)
       .master(config.master)
       .getOrCreate()
+    val sc = spark.sparkContext;
+    val sqlContext = spark.sqlContext
 
     val tables = new TPCDSTables(spark.sqlContext,
       dsdgenDir = config.dsdgenDir,
@@ -108,6 +106,11 @@ object GenTPCDSData {
       useDoubleForDecimal = config.useDoubleForDecimal,
       useStringForDate = config.useStringForDate)
 
+    val nonPartitionedTables = Array("call_center", "catalog_page", "customer", "customer_address",
+                                     "customer_demographics", "date_dim", "household_demographics",
+                                     "income_band", "item", "promotion", "reason", "ship_mode",
+                                     "store",  "time_dim", "warehouse", "web_page", "web_site");
+    val partitionedTables = Array("inventory", "web_returns", "catalog_returns", "store_returns", "web_sales", "catalog_sales", "store_sales")
     tables.genData(
       location = config.location,
       format = config.format,
@@ -117,5 +120,15 @@ object GenTPCDSData {
       filterOutNullPartitionValues = config.filterOutNullPartitionValues,
       tableFilter = config.tableFilter,
       numPartitions = config.numPartitions)
+
+    val databaseName = s"tpcds_sf${config.scaleFactor}" +
+      s"""_${if (config.useDoubleForDecimal) "with" else "no"}decimal""" +
+      s"""_${if (config.useStringForDate) "with" else "no"}date""" +
+      s"""_${if (config.filterOutNullPartitionValues) "no" else "with"}nulls"""
+    sqlContext.sql(s"drop database if exists $databaseName cascade")
+    sqlContext.sql(s"create database $databaseName")
+    tables.createExternalTables(config.location, config.format, databaseName, overwrite = true, discoverPartitions = true)
+    tables.analyzeTables(databaseName, analyzeColumns = true)
   }
+
 }
